@@ -3,21 +3,17 @@ import Combine
 
 extension Defaults {
 	@MainActor
-	final class Observable<Value: Serializable>: ObservableObject {
+	final class Observable<Value: Serializable>: @preconcurrency ObservableObject {
 		private var cancellable: AnyCancellable?
 		private var task: Task<Void, Never>?
+		private let key: Defaults.Key<Value>
 
-		var key: Defaults.Key<Value> {
-			didSet {
-				if key != oldValue {
-					observe()
-				}
-			}
-		}
+		let objectWillChange = ObservableObjectPublisher()
 
 		var value: Value {
 			get { Defaults[key] }
 			set {
+				objectWillChange.send()
 				Defaults[key] = newValue
 			}
 		}
@@ -25,20 +21,10 @@ extension Defaults {
 		init(_ key: Key<Value>) {
 			self.key = key
 
-			observe()
-		}
-
-		deinit {
-			task?.cancel()
-		}
-
-		private func observe() {
 			// We only use this on the latest OSes (as of adding this) since the backdeploy library has a lot of bugs.
 			if #available(macOS 13, iOS 16, tvOS 16, watchOS 9, visionOS 1.0, *) {
-				task?.cancel()
-
 				// The `@MainActor` is important as the `.send()` method doesn't inherit the `@MainActor` from the class.
-				task = .detached(priority: .userInitiated) { @MainActor [weak self, key] in
+				self.task = .detached(priority: .userInitiated) { @MainActor [weak self] in
 					for await _ in Defaults.updates(key, initial: false) {
 						guard let self else {
 							return
@@ -48,7 +34,7 @@ extension Defaults {
 					}
 				}
 			} else {
-				cancellable = Defaults.publisher(key, options: [.prior])
+				self.cancellable = Defaults.publisher(key, options: [.prior])
 					.sink { [weak self] change in
 						guard change.isPrior else {
 							return
@@ -59,6 +45,10 @@ extension Defaults {
 						}
 					}
 			}
+		}
+
+		deinit {
+			task?.cancel()
 		}
 
 		/**
@@ -83,7 +73,8 @@ public struct Default<Value: Defaults.Serializable>: @preconcurrency DynamicProp
 
 	private let key: Defaults.Key<Value>
 
-	@StateObject private var observable: Defaults.Observable<Value>
+	// Intentionally using `@ObservedObjected` over `@StateObject` so that the key can be dynamically changed.
+	@ObservedObject private var observable: Defaults.Observable<Value>
 
 	/**
 	Get/set a `Defaults` item and also have the view be updated when the value changes. This is similar to `@State`.
@@ -110,7 +101,7 @@ public struct Default<Value: Defaults.Serializable>: @preconcurrency DynamicProp
 	*/
 	public init(_ key: Defaults.Key<Value>) {
 		self.key = key
-		self._observable = .init(wrappedValue: .init(key))
+		self.observable = .init(key)
 	}
 
 	public var wrappedValue: Value {
@@ -134,7 +125,6 @@ public struct Default<Value: Defaults.Serializable>: @preconcurrency DynamicProp
 
 	@_documentation(visibility: private)
 	public mutating func update() {
-		observable.key = key
 		_observable.update()
 	}
 
